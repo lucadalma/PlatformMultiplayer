@@ -10,6 +10,7 @@
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "InputActionValue.h"
+#include "Net/UnrealNetwork.h"
 
 DEFINE_LOG_CATEGORY(LogTemplateCharacter);
 
@@ -20,7 +21,9 @@ AGP3_MultiplayerCharacter::AGP3_MultiplayerCharacter()
 {
 	// Set size for collision capsule
 	GetCapsuleComponent()->InitCapsuleSize(42.f, 96.0f);
-		
+
+	bReplicates = true;
+
 	// Don't rotate when the controller rotates. Let that just affect the camera.
 	bUseControllerRotationPitch = false;
 	bUseControllerRotationYaw = false;
@@ -56,27 +59,32 @@ AGP3_MultiplayerCharacter::AGP3_MultiplayerCharacter()
 
 void AGP3_MultiplayerCharacter::BeginPlay()
 {
-	// Call the base class  
 	Super::BeginPlay();
 
-	//Add Input Mapping Context
-	if (APlayerController* PlayerController = Cast<APlayerController>(Controller))
+	if (APlayerController* PC = Cast<APlayerController>(Controller))
 	{
-		if (UEnhancedInputLocalPlayerSubsystem* Subsystem = ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(PlayerController->GetLocalPlayer()))
+		if (UEnhancedInputLocalPlayerSubsystem* Subsystem = ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(PC->GetLocalPlayer()))
 		{
 			Subsystem->AddMappingContext(DefaultMappingContext, 0);
 		}
 	}
 }
 
+
 //////////////////////////////////////////////////////////////////////////
 // Input
+
+void AGP3_MultiplayerCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+	DOREPLIFETIME(AGP3_MultiplayerCharacter, HeldCube);
+}
 
 void AGP3_MultiplayerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
 {
 	// Set up action bindings
 	if (UEnhancedInputComponent* EnhancedInputComponent = Cast<UEnhancedInputComponent>(PlayerInputComponent)) {
-		
+
 		// Jumping
 		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Started, this, &ACharacter::Jump);
 		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Completed, this, &ACharacter::StopJumping);
@@ -86,6 +94,12 @@ void AGP3_MultiplayerCharacter::SetupPlayerInputComponent(UInputComponent* Playe
 
 		// Looking
 		EnhancedInputComponent->BindAction(LookAction, ETriggerEvent::Triggered, this, &AGP3_MultiplayerCharacter::Look);
+
+
+		// Grabbing
+		EnhancedInputComponent->BindAction(GrabAction, ETriggerEvent::Triggered, this, &AGP3_MultiplayerCharacter::TryGrabOrRelease);
+
+
 	}
 	else
 	{
@@ -106,7 +120,7 @@ void AGP3_MultiplayerCharacter::Move(const FInputActionValue& Value)
 
 		// get forward vector
 		const FVector ForwardDirection = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::X);
-	
+
 		// get right vector 
 		const FVector RightDirection = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::Y);
 
@@ -126,5 +140,91 @@ void AGP3_MultiplayerCharacter::Look(const FInputActionValue& Value)
 		// add yaw and pitch input to controller
 		AddControllerYawInput(LookAxisVector.X);
 		AddControllerPitchInput(LookAxisVector.Y);
+	}
+}
+
+void AGP3_MultiplayerCharacter::TryGrabOrRelease()
+{
+	//Se il player sta già tenendo in mano il cubo, lo rilascia
+	if (HeldCube)
+	{
+		Server_ReleaseCube();
+		return;
+	}
+	//Line trace per trovare il cubo davanti alla camera del player
+	FVector Start = FollowCamera->GetComponentLocation();
+	FVector End = Start + FollowCamera->GetForwardVector() * 1000.0f;
+
+	FHitResult Hit;
+	FCollisionQueryParams Params;
+	//ignora questo actor
+	Params.AddIgnoredActor(this);
+	
+	//Debug Line
+	DrawDebugLine(GetWorld(), Start, End, FColor::Red, false, 2.0f, 0, 2.0f);
+
+	//Se il line trace colpisce qualcosa
+	if (GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, Params))
+	{
+		//controlla se è un cubo
+		if (AGrabbableCube* Cube = Cast<AGrabbableCube>(Hit.GetActor()))
+		{
+			//grabba il cubo
+			Server_GrabCube(Cube);
+		}
+	}
+}
+
+
+void AGP3_MultiplayerCharacter::Server_GrabCube_Implementation(AGrabbableCube* Cube)
+{
+	//Se il cubo è valido e non è già afferrato
+	if (Cube && Cube->GrabbedBy == nullptr)
+	{
+		//heldcube sarà uguale a cube
+		HeldCube = Cube;
+		//assegno questo player come grabber
+		Cube->GrabbedBy = this;
+
+		//Attacco il cubo al socket (GrabSocket)
+		Cube->AttachToComponent(GetMesh(), FAttachmentTransformRules::SnapToTargetNotIncludingScale, FName("GrabSocket"));
+		//disabilito le collisioni mentre il cubo è in mano
+		Cube->SetActorEnableCollision(false);
+	}
+}
+
+
+void AGP3_MultiplayerCharacter::Server_ReleaseCube_Implementation()
+{
+	if (HeldCube)
+	{
+		//stacco il cubo dal player
+		HeldCube->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
+
+		//Line trace per trovare la posizione dove lasciare il cubo
+		FVector Start = HeldCube->GetActorLocation();
+		FVector End = Start - FVector(0, 0, 1000);
+		FHitResult Hit;
+		FCollisionQueryParams Params;
+		Params.AddIgnoredActor(this);
+		Params.AddIgnoredActor(HeldCube);
+
+		//Se colpisce qualcosa posiziono il cubo correttamente
+		if (GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, Params))
+		{
+			FVector NewLocation = Hit.ImpactPoint;
+			UPrimitiveComponent* RootComp = Cast<UPrimitiveComponent>(HeldCube->GetRootComponent());
+			if (RootComp)
+			{
+				FVector Extent = RootComp->Bounds.BoxExtent;
+				NewLocation.Z += Extent.Z;
+			}
+			HeldCube->SetActorLocation(NewLocation);
+		}
+
+		//Riattivo collisioni e resetto variabili
+		HeldCube->SetActorEnableCollision(true);
+		HeldCube->GrabbedBy = nullptr;
+		HeldCube = nullptr;
 	}
 }

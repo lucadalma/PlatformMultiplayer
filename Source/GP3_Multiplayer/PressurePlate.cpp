@@ -1,46 +1,50 @@
-// Fill out your copyright notice in the Description page of Project Settings.
-
-
 #include "PressurePlate.h"
 #include "GameFramework/Character.h"
 
-// Sets default values
+//Costruttore
 APressurePlate::APressurePlate()
 {
- 	// Set this actor to call Tick() every frame.  You can turn this off to improve performance if you don't need it.
+	//Abilita il tick
 	PrimaryActorTick.bCanEverTick = true;
 
+	//crea il trigger e set up
 	TriggerBox = CreateDefaultSubobject<UBoxComponent>(TEXT("TriggerBox"));
 	RootComponent = TriggerBox;
 	TriggerBox->SetCollisionProfileName(TEXT("Trigger"));
 
 }
 
-// Called when the game starts or when spawned
+//Begin
 void APressurePlate::BeginPlay()
 {
 	Super::BeginPlay();
+
+	//Assicura che l’attore sia replicato correttamente in multiplayer (solo lato server)
 	if (HasAuthority()) 
 	{
 		SetReplicates(true);
 		SetReplicateMovement(true);
 	}
+	//Funzioni del trigger
 	TriggerBox->OnComponentBeginOverlap.AddDynamic(this, &APressurePlate::OnOverlapBegin);
 	TriggerBox->OnComponentEndOverlap.AddDynamic(this, &APressurePlate::OnOverlapEnd);
 
 }
 
-// Called every frame
+//Tick
 void APressurePlate::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
 }
 
+//Quando un attore entra nel box trigger
 void APressurePlate::OnOverlapBegin(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult)
 {
+	//Controlla che l'attore sia un character
 	if (OtherActor && OtherActor->IsA<ACharacter>())
 	{
+		//Se c’è una piattaforma assegnata la attiva
 		if (PresPlatform)
 		{
 			PresPlatform->ActivatePlatform();
@@ -48,10 +52,13 @@ void APressurePlate::OnOverlapBegin(UPrimitiveComponent* OverlappedComponent, AA
 	}
 }
 
+//Quando un attore esce dal box trigger
 void APressurePlate::OnOverlapEnd(UPrimitiveComponent* OverlappedComp, AActor* OtherActor, UPrimitiveComponent* OtherComp, int32 OtherBodyIndex)
 {
+	//Controlla che l'attore sia un character
 	if (OtherActor && OtherActor->IsA<ACharacter>())
 	{
+		//Se c’è una piattaforma assegnata la disattiva
 		if (PresPlatform)
 		{
 			PresPlatform->DeactivatePlatform();
